@@ -41,20 +41,6 @@
 
 #include <checkint.h>
 
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-#include <sys/param.h>
-#include <dispatch/private.h>
-#include <CoreFoundation/CFUserNotification.h>
-#include <mach/mach.h>
-#include <mach/clock_types.h>
-#include <mach/clock.h>
-#include <unistd.h>
-#include <dlfcn.h>
-#include <pthread/private.h>
-#include <os/voucher_private.h>
-extern mach_port_t _dispatch_get_main_queue_port_4CF(void);
-extern void _dispatch_main_queue_callback_4CF(mach_msg_header_t *msg);
-#endif
 
 #if DEPLOYMENT_TARGET_IPHONESIMULATOR
 CF_EXPORT pthread_t _CF_pthread_main_thread_np(void);
@@ -128,169 +114,7 @@ static pthread_t kNilPthreadT = (pthread_t)0;
 
 // In order to reuse most of the code across Mach and Windows v1 RunLoopSources, we define a
 // simple abstraction layer spanning Mach ports and Windows HANDLES
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
 
-CF_PRIVATE uint32_t __CFGetProcessPortCount(void) {
-    ipc_info_space_t info;
-    ipc_info_name_array_t table = 0;
-    mach_msg_type_number_t tableCount = 0;
-    ipc_info_tree_name_array_t tree = 0;
-    mach_msg_type_number_t treeCount = 0;
-    
-    kern_return_t ret = mach_port_space_info(mach_task_self(), &info, &table, &tableCount, &tree, &treeCount);
-    if (ret != KERN_SUCCESS) {
-        return (uint32_t)0;
-    }
-    if (table != NULL) {
-        ret = vm_deallocate(mach_task_self(), (vm_address_t)table, tableCount * sizeof(*table));
-    }
-    if (tree != NULL) {
-        ret = vm_deallocate(mach_task_self(), (vm_address_t)tree, treeCount * sizeof(*tree));
-    }
-    return (uint32_t)tableCount;
-}
-
-CF_PRIVATE CFArrayRef __CFStopAllThreads(void) {
-    CFMutableArrayRef suspended_list = CFArrayCreateMutable(kCFAllocatorSystemDefault, 0, NULL);
-    mach_port_t my_task = mach_task_self();
-    mach_port_t my_thread = mach_thread_self();
-    thread_act_array_t thr_list = 0;
-    mach_msg_type_number_t thr_cnt = 0;
-    
-    // really, should loop doing the stopping until no more threads get added to the list N times in a row
-    kern_return_t ret = task_threads(my_task, &thr_list, &thr_cnt);
-    if (ret == KERN_SUCCESS) {
-        for (CFIndex idx = 0; idx < thr_cnt; idx++) {
-            thread_act_t thread = thr_list[idx];
-            if (thread == my_thread) continue;
-            if (CFArrayContainsValue(suspended_list, CFRangeMake(0, CFArrayGetCount(suspended_list)), (const void *)(uintptr_t)thread)) continue;
-            ret = thread_suspend(thread);
-            if (ret == KERN_SUCCESS) {
-                CFArrayAppendValue(suspended_list, (const void *)(uintptr_t)thread);
-            } else {
-                mach_port_deallocate(my_task, thread);
-            }
-        }
-        vm_deallocate(my_task, (vm_address_t)thr_list, sizeof(thread_t) * thr_cnt);
-    }
-    mach_port_deallocate(my_task, my_thread);
-    return suspended_list;
-}
-
-CF_PRIVATE void __CFRestartAllThreads(CFArrayRef threads) {
-    for (CFIndex idx = 0; idx < CFArrayGetCount(threads); idx++) {
-        thread_act_t thread = (thread_act_t)(uintptr_t)CFArrayGetValueAtIndex(threads, idx);
-        kern_return_t ret = thread_resume(thread);
-        if (ret != KERN_SUCCESS) CRASH("*** Failure from thread_resume (%d) ***", ret);
-        mach_port_deallocate(mach_task_self(), thread);
-    }
-}
-
-static uint32_t __CF_last_warned_port_count = 0;
-
-static void foo() __attribute__((unused));
-static void foo() {
-    uint32_t pcnt = __CFGetProcessPortCount();
-    if (__CF_last_warned_port_count + 1000 < pcnt) {
-        CFArrayRef threads = __CFStopAllThreads();
-        
-        
-        // do stuff here
-        CFOptionFlags responseFlags = 0;
-        SInt32 result = CFUserNotificationDisplayAlert(0.0, kCFUserNotificationCautionAlertLevel, NULL, NULL, NULL, CFSTR("High Mach Port Usage"), CFSTR("This application is using a lot of Mach ports."), CFSTR("Default"), CFSTR("Altern"), CFSTR("Other b"), &responseFlags);
-        if (0 != result) {
-            CFLog(3, CFSTR("ERROR"));
-        } else {
-            switch (responseFlags) {
-                case kCFUserNotificationDefaultResponse: CFLog(3, CFSTR("DefaultR")); break;
-                case kCFUserNotificationAlternateResponse: CFLog(3, CFSTR("AltR")); break;
-                case kCFUserNotificationOtherResponse: CFLog(3, CFSTR("OtherR")); break;
-                case kCFUserNotificationCancelResponse: CFLog(3, CFSTR("CancelR")); break;
-            }
-        }
-        
-        
-        __CFRestartAllThreads(threads);
-        CFRelease(threads);
-        __CF_last_warned_port_count = pcnt;
-    }
-}
-
-
-typedef mach_port_t __CFPort;
-#define CFPORT_NULL MACH_PORT_NULL
-typedef mach_port_t __CFPortSet;
-
-static void __THE_SYSTEM_HAS_NO_PORTS_AVAILABLE__(kern_return_t ret) __attribute__((noinline));
-static void __THE_SYSTEM_HAS_NO_PORTS_AVAILABLE__(kern_return_t ret) { HALT; };
-
-static __CFPort __CFPortAllocate(void) {
-    __CFPort result = CFPORT_NULL;
-    kern_return_t ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &result);
-    if (KERN_SUCCESS != ret) {
-        char msg[256];
-        snprintf(msg, 256, "*** The system has no mach ports available. You may be able to diagnose which application(s) are using ports by using 'top' or Activity Monitor. (%d) ***", ret);
-        CRSetCrashLogMessage(msg);
-        __THE_SYSTEM_HAS_NO_PORTS_AVAILABLE__(ret);
-        return CFPORT_NULL;
-    }
-    
-    ret = mach_port_insert_right(mach_task_self(), result, result, MACH_MSG_TYPE_MAKE_SEND);
-    if (KERN_SUCCESS != ret) CRASH("*** Unable to set send right on mach port. (%d) ***", ret);
-    
-    
-    mach_port_limits_t limits;
-    limits.mpl_qlimit = 1;
-    ret = mach_port_set_attributes(mach_task_self(), result, MACH_PORT_LIMITS_INFO, (mach_port_info_t)&limits, MACH_PORT_LIMITS_INFO_COUNT);
-    if (KERN_SUCCESS != ret) CRASH("*** Unable to set attributes on mach port. (%d) ***", ret);
-    
-    return result;
-}
-
-CF_INLINE void __CFPortFree(__CFPort port) {
-    mach_port_destroy(mach_task_self(), port);
-}
-
-static void __THE_SYSTEM_HAS_NO_PORT_SETS_AVAILABLE__(kern_return_t ret) __attribute__((noinline));
-static void __THE_SYSTEM_HAS_NO_PORT_SETS_AVAILABLE__(kern_return_t ret) { HALT; };
-
-CF_INLINE __CFPortSet __CFPortSetAllocate(void) {
-    __CFPortSet result;
-    kern_return_t ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &result);
-    if (KERN_SUCCESS != ret) { __THE_SYSTEM_HAS_NO_PORT_SETS_AVAILABLE__(ret); }
-    return (KERN_SUCCESS == ret) ? result : CFPORT_NULL;
-}
-
-CF_INLINE kern_return_t __CFPortSetInsert(__CFPort port, __CFPortSet portSet) {
-    if (MACH_PORT_NULL == port) {
-        return -1;
-    }
-    return mach_port_insert_member(mach_task_self(), port, portSet);
-}
-
-CF_INLINE kern_return_t __CFPortSetRemove(__CFPort port, __CFPortSet portSet) {
-    if (MACH_PORT_NULL == port) {
-        return -1;
-    }
-    return mach_port_extract_member(mach_task_self(), port, portSet);
-}
-
-CF_INLINE void __CFPortSetFree(__CFPortSet portSet) {
-    kern_return_t ret;
-    mach_port_name_array_t array;
-    mach_msg_type_number_t idx, number;
-    
-    ret = mach_port_get_set_status(mach_task_self(), portSet, &array, &number);
-    if (KERN_SUCCESS == ret) {
-        for (idx = 0; idx < number; idx++) {
-            mach_port_extract_member(mach_task_self(), array[idx], portSet);
-        }
-        vm_deallocate(mach_task_self(), (vm_address_t)array, number * sizeof(mach_port_name_t));
-    }
-    mach_port_destroy(mach_task_self(), portSet);
-}
-
-#endif
 
 #if !defined(__MACTYPES__) && !defined(_OS_OSTYPES_H)
 #if defined(__BIG_ENDIAN__)
@@ -307,49 +131,6 @@ typedef    struct UnsignedWide {
 typedef UnsignedWide        AbsoluteTime;
 #endif
 
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-
-#if USE_DISPATCH_SOURCE_FOR_TIMERS
-#endif
-#if USE_MK_TIMER_TOO
-extern mach_port_name_t mk_timer_create(void);
-extern kern_return_t mk_timer_destroy(mach_port_name_t name);
-extern kern_return_t mk_timer_arm(mach_port_name_t name, AbsoluteTime expire_time);
-extern kern_return_t mk_timer_cancel(mach_port_name_t name, AbsoluteTime *result_time);
-
-CF_INLINE AbsoluteTime __CFUInt64ToAbsoluteTime(uint64_t x) {
-    AbsoluteTime a;
-    a.hi = x >> 32;
-    a.lo = x & (uint64_t)0xFFFFFFFF;
-    return a;
-}
-#endif
-
-/**
- 发送琐碎的信息
-
- @param port 接受消息的端口
- @param msg_id 消息ID
- @param options option
- @param timeout 超时时间
- @return 消息发送结果
- */
-static uint32_t __CFSendTrivialMachMessage(mach_port_t port, uint32_t msg_id, CFOptionFlags options, uint32_t timeout) {
-    kern_return_t result;
-    mach_msg_header_t header;
-    header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-    header.msgh_size = sizeof(mach_msg_header_t);
-    header.msgh_remote_port = port;
-    header.msgh_local_port = MACH_PORT_NULL;
-    header.msgh_id = msg_id;
-    // 发送消息结果
-    result = mach_msg(&header, MACH_SEND_MSG|options, header.msgh_size, 0, MACH_PORT_NULL, timeout, MACH_PORT_NULL);
-    // 销毁msg_header
-    if (result == MACH_SEND_TIMED_OUT) mach_msg_destroy(&header);
-    return result;
-}
-
-#endif
 
 #pragma mark -
 #pragma mark Modes
@@ -718,7 +499,7 @@ static CFRunLoopModeRef __CFRunLoopFindMode(CFRunLoopRef rl, CFStringRef modeNam
 // expects rl and rlm locked
 
 /**
- 检查RunLoopMode是否是空???
+ 检查RunLoopMode是否还有待执行任务？，判断指标<mode.sources0 | sources1 | timers | rl.block_items>
  
  @param rl RunLoop
  @param rlm RunLoopMode
@@ -1760,19 +1541,12 @@ static void __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__(void (*pe
 
 static void __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__() __attribute__((noinline));
 static void __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__(
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-                                                                       void *(*perform)(void *msg, CFIndex size, CFAllocatorRef allocator, void *info),
-                                                                       mach_msg_header_t *msg, CFIndex size, mach_msg_header_t **reply,
-#else
+
                                                                        void (*perform)(void *),
-#endif
                                                                        void *info) {
     if (perform) {
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-        *reply = perform(msg, size, kCFAllocatorSystemDefault, info);
-#else
+
         perform(info);
-#endif
     }
     asm __volatile__(""); // thwart tail-call optimization
 }
@@ -1870,9 +1644,6 @@ static Boolean __CFRunLoopDoSource1() __attribute__((noinline));
  @return 调用结果
  */
 static Boolean __CFRunLoopDoSource1(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRunLoopSourceRef rls
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-                                    , mach_msg_header_t *msg, CFIndex size, mach_msg_header_t **reply
-#endif
 ) {    /* DOES CALLOUT */
     CHECK_FOR_FORK();
     Boolean sourceHandled = false;
@@ -1887,9 +1658,7 @@ static Boolean __CFRunLoopDoSource1(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFRun
         __CFRunLoopSourceUnlock(rls);
         __CFRunLoopDebugInfoForRunLoopSource(rls);
         __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE1_PERFORM_FUNCTION__(rls->_context.version1.perform,
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-                                                                   msg, size, reply,
-#endif
+
                                                                    rls->_context.version1.info);
         CHECK_FOR_FORK();
         sourceHandled = true;
@@ -2288,99 +2057,7 @@ CF_EXPORT Boolean _CFRunLoopFinished(CFRunLoopRef rl, CFStringRef modeName) {
 // 定义__CFRunLoopRun，返回：int32_t  参数：runloop | runloopMode | interval | stoped | preRunloopMode
 static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInterval seconds, Boolean stopAfterHandle, CFRunLoopModeRef previousMode) __attribute__((noinline));
 
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
 
-#define TIMEOUT_INFINITY (~(mach_msg_timeout_t)0)
-
-/**
- RunLoop是否成功监听到Mach端口
-
- @param port 端口
- @param buffer 消息头部指针
- @param buffer_size 消息大小
- @param livePort 活动端口指针
- @param timeout 超时时间
- @param voucherState 凭证状态指针
- @param voucherCopy 凭证副本指针
- @return 是否在监听
- */
-static Boolean __CFRunLoopServiceMachPort(mach_port_name_t port, mach_msg_header_t **buffer, size_t buffer_size, mach_port_t *livePort, mach_msg_timeout_t timeout, voucher_mach_msg_state_t *voucherState, voucher_t *voucherCopy) {
-    
-    Boolean originalBuffer = true;
-    kern_return_t ret = KERN_SUCCESS;
-    for (;;) {
-        /* In that sleep of death what nightmares may come ... */
-        mach_msg_header_t *msg = (mach_msg_header_t *)*buffer;
-        // 初始化头部信息？？
-        msg->msgh_bits = 0;
-        msg->msgh_local_port = port;
-        msg->msgh_remote_port = MACH_PORT_NULL;
-        msg->msgh_size = buffer_size;
-        msg->msgh_id = 0;
-        // 无限超时
-        if (TIMEOUT_INFINITY == timeout) {
-            // 进入休眠
-            CFRUNLOOP_SLEEP();
-        } else {
-            // 进入轮询
-            CFRUNLOOP_POLL();
-        }
-        // 发送消息吗，返回发送状态？
-        // mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify)
-        // mach_msg_header_t *msg;
-        // mach_msg_option_t option;
-        // mach_msg_size_t send_size;
-        // mach_msg_size_t rcv_size;
-        // mach_port_t rcv_name;
-        // mach_msg_timeout_t timeout;
-        // mach_port_t notify;
-        
-        ret = mach_msg(msg, MACH_RCV_MSG|(voucherState ? MACH_RCV_VOUCHER : 0)|MACH_RCV_LARGE|((TIMEOUT_INFINITY != timeout) ? MACH_RCV_TIMEOUT : 0)|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)|MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AV), 0, msg->msgh_size, port, timeout, MACH_PORT_NULL);
-        
-        // Take care of all voucher-related work right after mach_msg.
-        // If we don't release the previous voucher we're going to leak it.
-        // 释放msg的凭证
-        voucher_mach_msg_revert(*voucherState);
-        
-        // Someone will be responsible for calling voucher_mach_msg_revert. This call makes the received voucher the current one.
-        *voucherState = voucher_mach_msg_adopt(msg);
-        
-        if (voucherCopy) {
-            if (*voucherState != VOUCHER_MACH_MSG_STATE_UNCHANGED) {
-                // Caller requested a copy of the voucher at this point. By doing this right next to mach_msg we make sure that no voucher has been set in between the return of mach_msg and the use of the voucher copy.
-                // CFMachPortBoost uses the voucher to drop importance explicitly. However, we want to make sure we only drop importance for a new voucher (not unchanged), so we only set the TSD when the voucher is not state_unchanged.
-                *voucherCopy = voucher_copy();
-            } else {
-                *voucherCopy = NULL;
-            }
-        }
-        // 唤醒
-        CFRUNLOOP_WAKEUP(ret);
-        // 成功了
-        if (MACH_MSG_SUCCESS == ret) {
-            *livePort = msg ? msg->msgh_local_port : MACH_PORT_NULL;
-            return true;
-        }
-        // 超时
-        if (MACH_RCV_TIMED_OUT == ret) {
-            if (!originalBuffer) free(msg);
-            *buffer = NULL;
-            *livePort = MACH_PORT_NULL;
-            return false;
-        }
-        
-        if (MACH_RCV_TOO_LARGE != ret) break;
-        // 过大
-        buffer_size = round_msg(msg->msgh_size + MAX_TRAILER_SIZE);
-        if (originalBuffer) *buffer = NULL;
-        originalBuffer = false;
-        *buffer = realloc(*buffer, buffer_size);
-    }
-    HALT;
-    return false;
-}
-
-#endif
 // 超时上下文
 struct __timeout_context {
     dispatch_source_t ds;   /* source */
@@ -2418,7 +2095,10 @@ static void __CFRunLoopTimeout(void *arg) {
 static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInterval seconds, Boolean stopAfterHandle, CFRunLoopModeRef previousMode) {
     // 当前时间开始时间
     uint64_t startTSR = mach_absolute_time();
-    // 询问RunLoop是否已经停止了
+    
+    /// **************** case1: RunLoop已经停止 **************** \\\
+    
+    // RunLoop已经停止，改一下状态，直接返回，等待下一次调用。
     if (__CFRunLoopIsStopped(rl)) {
         // 更改RunLoop.perRunData.stooped标识为未停止，然后退出，为下次运行做准备。
         __CFRunLoopUnsetStopped(rl);
@@ -2428,26 +2108,19 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         rlm->_stopped = false;
         return kCFRunLoopRunStopped;
     }
+    
+    /// **************** case2: 获取消息端口 **************** \\\
+    
     // 消息端口dispatchPort，主线程消息端口
     mach_port_name_t dispatchPort = MACH_PORT_NULL;
-    // 判断线程是否安全
+    // 相当于判断，当前运行的线程是主线程
     Boolean libdispatchQSafe = pthread_main_np() && ((HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && NULL == previousMode) || (!HANDLE_DISPATCH_ON_BASE_INVOCATION_ONLY && 0 == _CFGetTSD(__CFTSDKeyIsInGCDMainQ)));
-    //  是在主线程运行的RunLoop，将主线程的Port拿到
+    //  如果是在主线程上运行，并且主线程的runLoop与参数rl一致，rl的modes也包含rlm的name，将主线程队列端口赋值给dispatchPort
     if (libdispatchQSafe && (CFRunLoopGetMain() == rl) && CFSetContainsValue(rl->_commonModes, rlm->_name)) {
         // 主线程，获取主线程的port
         dispatchPort = _dispatch_get_main_queue_port_4CF();
     }
     
-#if USE_DISPATCH_SOURCE_FOR_TIMERS
-    // runLoopMode所在线程的port，队列线程端口
-    mach_port_name_t modeQueuePort = MACH_PORT_NULL;
-    if (rlm->_queue) {
-        modeQueuePort = _dispatch_runloop_root_queue_get_port_4CF(rlm->_queue);
-        if (!modeQueuePort) {
-            CRASH("Unable to get port for run loop mode queue (%d)", -1);
-        }
-    }
-#endif
     // 超时dispatch_source_t
     dispatch_source_t timeout_timer = NULL;
     struct __timeout_context *timeout_context = (struct __timeout_context *)malloc(sizeof(*timeout_context));
@@ -2482,22 +2155,8 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
     Boolean didDispatchPortLastTime = true;
     int32_t retVal = 0;
     do {
-        
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-        // MACOS，EMBED系统，凭证状态
-        voucher_mach_msg_state_t voucherState = VOUCHER_MACH_MSG_STATE_UNCHANGED;
-        // 凭证副本
-        voucher_t voucherCopy = NULL;
-#endif
         // 消息buffer
         uint8_t msg_buffer[3 * 1024];
-        
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-        // MACOS，EMBED系统， 消息
-        mach_msg_header_t *msg = NULL;
-        // 活动端口
-        mach_port_t livePort = MACH_PORT_NULL;
-#endif
         // 等待消息的port集合
         __CFPortSet waitSet = rlm->_portSet;
         // 关闭忽略唤醒
@@ -2518,13 +2177,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         Boolean poll = sourceHandledThisLoop || (0ULL == timeout_context->termTSR);
         
         if (MACH_PORT_NULL != dispatchPort && !didDispatchPortLastTime) {
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-            msg = (mach_msg_header_t *)msg_buffer;
-            if (__CFRunLoopServiceMachPort(dispatchPort, &msg, sizeof(msg_buffer), &livePort, 0, &voucherState, NULL)) {
-                // 直接唤醒
-                goto handle_msg;
-            }
-#endif
+            // delete macos logic ...
         }
         
         didDispatchPortLastTime = false;
@@ -2545,48 +2198,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         
         CFAbsoluteTime sleepStart = poll ? 0.0 : CFAbsoluteTimeGetCurrent();
         
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-#if USE_DISPATCH_SOURCE_FOR_TIMERS
-        // while(1) 有定时任务，一直循环监听msg
-        do {
-            if (kCFUseCollectableAllocator) {
-                // 数组构建器，置空一段连续内存
-                // objc_clear_stack(0);
-                // <rdar://problem/16393959>
-                memset(msg_buffer, 0, sizeof(msg_buffer));
-            }
-            // 拿到mach的msg
-            msg = (mach_msg_header_t *)msg_buffer;
-            
-            __CFRunLoopServiceMachPort(waitSet, &msg, sizeof(msg_buffer), &livePort, poll ? 0 : TIMEOUT_INFINITY, &voucherState, &voucherCopy);
-            
-            if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {
-                // Drain the internal queue. If one of the callout blocks sets the timerFired flag, break out and service the timer.
-                while (_dispatch_runloop_root_queue_perform_4CF(rlm->_queue));
-                if (rlm->_timerFired) {
-                    // Leave livePort as the queue port, and service timers below
-                    rlm->_timerFired = false;
-                    break;
-                } else {
-                    if (msg && msg != (mach_msg_header_t *)msg_buffer) free(msg);
-                }
-            } else {
-                // Go ahead and leave the inner loop.
-                break;
-            }
-        } while (1);
-#else
-        if (kCFUseCollectableAllocator) {
-            // objc_clear_stack(0);
-            // <rdar://problem/16393959>
-            // 用了数组构建器，置空内存
-            memset(msg_buffer, 0, sizeof(msg_buffer));
-        }
-        msg = (mach_msg_header_t *)msg_buffer;
-        __CFRunLoopServiceMachPort(waitSet, &msg, sizeof(msg_buffer), &livePort, poll ? 0 : TIMEOUT_INFINITY, &voucherState, &voucherCopy);
-#endif
-        
-#endif
+
         // 唤醒了runLoop，开始干活了
         __CFRunLoopLock(rl);
         __CFRunLoopModeLock(rlm);
@@ -2607,6 +2219,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         if (!poll && (rlm->_observerMask & kCFRunLoopAfterWaiting)) __CFRunLoopDoObservers(rl, rlm, kCFRunLoopAfterWaiting);
     // goto here
     handle_msg:;
+        // runLoop唤醒前的一些设置工作
         __CFRunLoopSetIgnoreWakeUps(rl);
 
         if (MACH_PORT_NULL == livePort) {
@@ -2616,15 +2229,6 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             CFRUNLOOP_WAKEUP_FOR_WAKEUP();
             // do nothing on Mac OS
         }
-#if USE_DISPATCH_SOURCE_FOR_TIMERS
-        else if (modeQueuePort != MACH_PORT_NULL && livePort == modeQueuePort) {
-            CFRUNLOOP_WAKEUP_FOR_TIMER();
-            if (!__CFRunLoopDoTimers(rl, rlm, mach_absolute_time())) {
-                // Re-arm the next timer, because we apparently fired early
-                __CFArmNextTimerInMode(rlm, rl);
-            }
-        }
-#endif
 #if USE_MK_TIMER_TOO
         else if (rlm->_timerPort != MACH_PORT_NULL && livePort == rlm->_timerPort) {
             CFRUNLOOP_WAKEUP_FOR_TIMER();
@@ -2656,24 +2260,14 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
             // Despite the name, this works for windows handles as well
             CFRunLoopSourceRef rls = __CFRunLoopModeFindSourceForMachPort(rl, rlm, livePort);
             if (rls) {
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-                mach_msg_header_t *reply = NULL;
-                sourceHandledThisLoop = __CFRunLoopDoSource1(rl, rlm, rls, msg, msg->msgh_size, &reply) || sourceHandledThisLoop;
-                if (NULL != reply) {
-                    (void)mach_msg(reply, MACH_SEND_MSG, reply->msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
-                    CFAllocatorDeallocate(kCFAllocatorSystemDefault, reply);
-                }
-#endif
+                // mac os logic code
             }
             
             // Restore the previous voucher
             _CFSetTSD(__CFTSDKeyMachMessageHasVoucher, previousVoucher, os_release);
             
         }
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-        if (msg && msg != (mach_msg_header_t *)msg_buffer) free(msg);
-#endif
-        
+        // 执行回调任务函数
         __CFRunLoopDoBlocks(rl, rlm);
         
         
@@ -2690,11 +2284,6 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         } else if (__CFRunLoopModeIsEmpty(rl, rlm, previousMode)) {
             retVal = kCFRunLoopRunFinished;
         }
-        
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-        voucher_mach_msg_revert(voucherState);
-        os_release(voucherCopy);
-#endif
         
     } while (0 == retVal);
     
@@ -2829,15 +2418,7 @@ void CFRunLoopWakeUp(CFRunLoopRef rl) {
         __CFRunLoopUnlock(rl);
         return;
     }
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-    kern_return_t ret;
-    /* We unconditionally try to send the message, since we don't want
-     * to lose a wakeup, but the send may fail if there is already a
-     * wakeup pending, since the queue length is 1. */
-    // 向端口Port发送消息
-    ret = __CFSendTrivialMachMessage(rl->_wakeUpPort, 0, MACH_SEND_TIMEOUT, 0);
-    if (ret != MACH_MSG_SUCCESS && ret != MACH_SEND_TIMED_OUT) CRASH("*** Unable to send message to wake up port. (%d) ***", ret);
-#endif
+
     __CFRunLoopUnlock(rl);
 }
 
@@ -3470,11 +3051,6 @@ static CFStringRef __CFRunLoopSourceCopyDescription(CFTypeRef cf) {    /* DOES C
     }
     if (NULL == contextDesc) {
         void *addr = rls->_context.version0.version == 0 ? (void *)rls->_context.version0.perform : (rls->_context.version0.version == 1 ? (void *)rls->_context.version1.perform : NULL);
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-        Dl_info info;
-        const char *name = (dladdr(addr, &info) && info.dli_saddr == addr && info.dli_sname) ? info.dli_sname : "???";
-        contextDesc = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopSource context>{version = %ld, info = %p, callout = %s (%p)}"), rls->_context.version0.version, rls->_context.version0.info, name, addr);
-#endif
     }
 
     result = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopSource %p [%p]>{signalled = %s, valid = %s, order = %ld, context = %@}"), cf, CFGetAllocator(rls), __CFRunLoopSourceIsSignaled(rls) ? "Yes" : "No", __CFIsValid(rls) ? "Yes" : "No", (unsigned long)rls->_order, contextDesc);
@@ -3694,12 +3270,6 @@ static CFStringRef __CFRunLoopObserverCopyDescription(CFTypeRef cf) {    /* DOES
     if (!contextDesc) {
         contextDesc = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopObserver context %p>"), rlo->_context.info);
     }
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-    void *addr = rlo->_callout;
-    Dl_info info;
-    const char *name = (dladdr(addr, &info) && info.dli_saddr == addr && info.dli_sname) ? info.dli_sname : "???";
-    result = CFStringCreateWithFormat(kCFAllocatorSystemDefault, NULL, CFSTR("<CFRunLoopObserver %p [%p]>{valid = %s, activities = 0x%lx, repeats = %s, order = %ld, callout = %s (%p), context = %@}"), cf, CFGetAllocator(rlo), __CFIsValid(rlo) ? "Yes" : "No", (long)rlo->_activities, __CFRunLoopObserverRepeats(rlo) ? "Yes" : "No", (long)rlo->_order, name, addr, contextDesc);
-#endif
     CFRelease(contextDesc);
     return result;
 }
@@ -4204,14 +3774,7 @@ void CFRunLoopTimerGetContext(CFRunLoopTimerRef rlt, CFRunLoopTimerContext *cont
  @return tolerance of timer
  */
 CFTimeInterval CFRunLoopTimerGetTolerance(CFRunLoopTimerRef rlt) {
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-    CHECK_FOR_FORK();
-    CF_OBJC_FUNCDISPATCHV(CFRunLoopTimerGetTypeID(), CFTimeInterval, (NSTimer *)rlt, tolerance);
-    __CFGenericValidateType(rlt, CFRunLoopTimerGetTypeID());
-    return rlt->_tolerance;
-#else
     return 0.0;
-#endif
 }
 
 /**
@@ -4221,25 +3784,7 @@ CFTimeInterval CFRunLoopTimerGetTolerance(CFRunLoopTimerRef rlt) {
  @param tolerance 容错
  */
 void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef rlt, CFTimeInterval tolerance) {
-#if DEPLOYMENT_TARGET_MACOSX || DEPLOYMENT_TARGET_EMBEDDED || DEPLOYMENT_TARGET_EMBEDDED_MINI
-    CHECK_FOR_FORK();
-    CF_OBJC_FUNCDISPATCHV(CFRunLoopTimerGetTypeID(), void, (NSTimer *)rlt, setTolerance:tolerance);
-    __CFGenericValidateType(rlt, CFRunLoopTimerGetTypeID());
-    /*
-     * dispatch rules:
-     *
-     * For the initial timer fire at 'start', the upper limit to the allowable
-     * delay is set to 'leeway' nanoseconds. For the subsequent timer fires at
-     * 'start' + N * 'interval', the upper limit is MIN('leeway','interval'/2).
-     */
-    if (rlt->_interval > 0) {
-        rlt->_tolerance = MIN(tolerance, rlt->_interval / 2);
-    } else {
-        // Tolerance must be a positive value or zero
-        if (tolerance < 0) tolerance = 0.0;
-        rlt->_tolerance = tolerance;
-    }
-#endif
+// macosx logic code
 }
 
 

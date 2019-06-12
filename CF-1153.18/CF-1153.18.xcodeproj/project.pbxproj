@@ -174,6 +174,7 @@
 		802E054E2276E152008B09A1 /* CFUnicodeDecomposition.h in Headers */ = {isa = PBXBuildFile; fileRef = 802E04A92276E152008B09A1 /* CFUnicodeDecomposition.h */; };
 		802E054F2276E152008B09A1 /* CFSocket.h in Headers */ = {isa = PBXBuildFile; fileRef = 802E04AA2276E152008B09A1 /* CFSocket.h */; };
 		802E05502276E152008B09A1 /* CFStringUtilities.c in Sources */ = {isa = PBXBuildFile; fileRef = 802E04AB2276E152008B09A1 /* CFStringUtilities.c */; };
+		80D3BB0F22B0AD4500EFBE3E /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 80D3BB0E22B0AD4500EFBE3E /* CoreFoundation.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -346,6 +347,7 @@
 		802E04A92276E152008B09A1 /* CFUnicodeDecomposition.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CFUnicodeDecomposition.h; sourceTree = "<group>"; };
 		802E04AA2276E152008B09A1 /* CFSocket.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CFSocket.h; sourceTree = "<group>"; };
 		802E04AB2276E152008B09A1 /* CFStringUtilities.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = CFStringUtilities.c; sourceTree = "<group>"; };
+		80D3BB0E22B0AD4500EFBE3E /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = System/Library/Frameworks/CoreFoundation.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -353,6 +355,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				80D3BB0F22B0AD4500EFBE3E /* CoreFoundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -364,6 +367,7 @@
 			children = (
 				802E03D12276E0CD008B09A1 /* CF-1153.18 */,
 				802E03D02276E0CD008B09A1 /* Products */,
+				80D3BB0D22B0AD4500EFBE3E /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -564,6 +568,14 @@
 				802E04242276E148008B09A1 /* plconvert.c */,
 			);
 			path = Examples;
+			sourceTree = "<group>";
+		};
+		80D3BB0D22B0AD4500EFBE3E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				80D3BB0E22B0AD4500EFBE3E /* CoreFoundation.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
