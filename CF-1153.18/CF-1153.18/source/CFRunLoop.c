@@ -2309,7 +2309,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
 }
 
 /**
- runLoop执行指定的mode
+ runLoop运行在执行指定的mode，调起runLoopRun()
 
  @param rl runLoop
  @param modeName 要执行的mode
@@ -2332,6 +2332,7 @@ SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterva
         // 返回已结束
         return did ? kCFRunLoopRunHandledSource : kCFRunLoopRunFinished;
     }
+    // 推入一个新的perRunData
     volatile _per_run_data *previousPerRun = __CFRunLoopPushPerRunData(rl);
     // 之前运行的mode
     CFRunLoopModeRef previousMode = rl->_currentMode;
@@ -2342,6 +2343,7 @@ SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterva
     // 进入runLoop，调用observer的回调函数
     if (currentMode->_observerMask & kCFRunLoopEntry ) {
         __CFRunLoopDoObservers(rl, currentMode, kCFRunLoopEntry);
+        // 执行loop中的任务
         result = __CFRunLoopRun(rl, currentMode, seconds, returnAfterSourceHandled, previousMode);
     }
     // 退出runLoop，调用observer的回调函数
@@ -2358,7 +2360,7 @@ SInt32 CFRunLoopRunSpecific(CFRunLoopRef rl, CFStringRef modeName, CFTimeInterva
 }
 
 /**
- 循环执行runLoop
+ RunLoop的开始执行的入口，由我们自己调用
  */
 void CFRunLoopRun(void) {    /* DOES CALLOUT */
     int32_t result;
