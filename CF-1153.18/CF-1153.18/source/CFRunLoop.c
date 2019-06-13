@@ -1377,9 +1377,13 @@ static void __CFRUNLOOP_IS_CALLING_OUT_TO_A_BLOCK__(void (^block)(void)) {
  @return do state？
  */
 static Boolean __CFRunLoopDoBlocks(CFRunLoopRef rl, CFRunLoopModeRef rlm) { // Call with rl and rlm locked
+    
     if (!rl->_blocks_head) return false;
     if (!rlm || !rlm->_name) return false;
     Boolean did = false;
+    
+    /// ************** 查找runLoop持有的block链表，依次调用block ************** \\\
+    
     // 声明head、tail
     struct _block_item *head = rl->_blocks_head;
     struct _block_item *tail = rl->_blocks_tail;
@@ -1508,7 +1512,7 @@ static CFComparisonResult __CFRunLoopSourceComparator(const void *val1, const vo
 }
 
 /**
- 持有runLoopSource
+ 将value放置在context位置的内存空间中
 
  @param value runLoopSource
  @param context memory pointer for store value
@@ -1615,6 +1619,7 @@ static Boolean __CFRunLoopDoSources0(CFRunLoopRef rl, CFRunLoopModeRef rlm, Bool
                     __CFRunLoopSourceUnlock(rls);
                 }
                 if (stopAfterHandle && sourceHandled) {
+                    // 感觉只执行一个source0，就跳出去了
                     break;
                 }
             }
@@ -2096,7 +2101,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
     // 当前时间开始时间
     uint64_t startTSR = mach_absolute_time();
     
-    /// **************** case1: RunLoop已经停止 **************** \\\
+    /// **************** RunLoop已经停止 **************** \\\
     
     // RunLoop已经停止，改一下状态，直接返回，等待下一次调用。
     if (__CFRunLoopIsStopped(rl)) {
@@ -2109,7 +2114,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         return kCFRunLoopRunStopped;
     }
     
-    /// **************** case2: 获取消息端口 **************** \\\
+    /// **************** 获取消息端口Port **************** \\\
     
     // 消息端口dispatchPort，主线程消息端口
     mach_port_name_t dispatchPort = MACH_PORT_NULL;
@@ -2121,7 +2126,9 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         dispatchPort = _dispatch_get_main_queue_port_4CF();
     }
     
-    // 超时dispatch_source_t
+    /// **************** 设置任务超时timer **************** \\\
+    
+    // 设置任务超时定时timer，在seconds过后，会执行超时设定。
     dispatch_source_t timeout_timer = NULL;
     struct __timeout_context *timeout_context = (struct __timeout_context *)malloc(sizeof(*timeout_context));
     if (seconds <= 0.0) { // instant timeout
@@ -2144,6 +2151,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         // 设置event_handler cancel_handler
         dispatch_source_set_event_handler_f(timeout_timer, __CFRunLoopTimeout);
         dispatch_source_set_cancel_handler_f(timeout_timer, __CFRunLoopTimeoutCancel);
+        /// seconds后就执行超时操作
         uint64_t ns_at = (uint64_t)((__CFTSRToTimeInterval(startTSR) + seconds) * 1000000000ULL);
         dispatch_source_set_timer(timeout_timer, dispatch_time(1, ns_at), DISPATCH_TIME_FOREVER, 1000ULL);
         dispatch_resume(timeout_timer);
@@ -2152,8 +2160,11 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         timeout_context->termTSR = UINT64_MAX;
     }
     
+    /// **************** 任务执行do{}while() **************** \\\
+    
     Boolean didDispatchPortLastTime = true;
     int32_t retVal = 0;
+    // do {} while (retVal == 0);
     do {
         // 消息buffer
         uint8_t msg_buffer[3 * 1024];
@@ -2165,7 +2176,7 @@ static int32_t __CFRunLoopRun(CFRunLoopRef rl, CFRunLoopModeRef rlm, CFTimeInter
         if (rlm->_observerMask & kCFRunLoopBeforeTimers) __CFRunLoopDoObservers(rl, rlm, kCFRunLoopBeforeTimers);
         if (rlm->_observerMask & kCFRunLoopBeforeSources) __CFRunLoopDoObservers(rl, rlm, kCFRunLoopBeforeSources);
         
-        // 执行runLoop所有的block_itmes
+        // 执行runLoop持有的所有block
         __CFRunLoopDoBlocks(rl, rlm);
         // Source0的callout是否已经被Loop执行过了
         Boolean sourceHandledThisLoop = __CFRunLoopDoSources0(rl, rlm, stopAfterHandle);
@@ -3299,12 +3310,12 @@ CFTypeID CFRunLoopObserverGetTypeID(void) {
 }
 
 /**
- 为RunLoop创建观察者
+ 创建观察者
 
- @param allocator 构建这
+ @param allocator 构建器
  @param activities 活动状态（bits info）
  @param repeats 是否重复
- @param order 序号？
+ @param order 优先序号
  @param callout 回调
  @param context 上下文
  @return 观察者
@@ -3486,7 +3497,7 @@ static void __CFRunLoopTimerDeallocate(CFTypeRef cf) {    /* DOES CALLOUT */
     rlt->_rlModes = NULL;
     pthread_mutex_destroy(&rlt->_lock);
 }
-
+/// 定义RunLoopTimerClass 结构体
 static const CFRuntimeClass __CFRunLoopTimerClass = {
     0,
     "CFRunLoopTimer",
