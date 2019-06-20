@@ -154,8 +154,8 @@ struct __CFRunLoopMode {
     CFStringRef _name;  /* mode的名字 */
     Boolean _stopped;   /* 是否停止 */
     char _padding[3];   /* padding 字符数组 ？ 干什么用的？ */
-    CFMutableSetRef _sources0;  /* source0 集合 */
-    CFMutableSetRef _sources1;  /* source1 集合 */
+    CFMutableSetRef _sources0;  /* Input sources 自定义source集合 */
+    CFMutableSetRef _sources1;  /* Input sources port-based source 集合 */
     CFMutableArrayRef _observers;   /* observers 数组*/
     CFMutableArrayRef _timers;  /* timers 数组*/
     CFMutableDictionaryRef _portToV1SourceMap;  /* CFPort和RunLoopSource对应的字典，通过Port查找RunLoopSource */
